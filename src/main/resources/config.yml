@@ -1,26 +1,32 @@
 # Configuración del Board
 # Esta configuración se puede recargar con /board reload
 
-# Título del Board (soporta colores hex como &#FF0000 y colores &)
-# Puede ser un texto fijo o varias líneas animadas
+# Título del Board
 title:
+  text: "Servidor Board"
   animation:
-    enabled: false
-    interval: 40  # ticks para cambiar de línea
+    enabled: true
+    interval: 1  # cada cuántas actualizaciones del board cambia el frame (1 = más fluido)
+  rainbow:
+    enabled: true
+    bold: true
+    speed: 14      # desplazamiento del arcoíris por frame
+    spread: 30     # separación de color entre letras (gradiente)
+    saturation: 0.9
+    brightness: 1.0
+  # Alternativa: líneas fijas animadas (desactiva rainbow.enabled)
   lines:
     - "Servidor Board"
     - "&#FFAA00&lServidor Board"
 
-# Líneas de encabezado (arriba del board, debajo del título)
 header:
   animation:
     enabled: false
-    interval: 40  # ticks para cambiar de línea
+    interval: 40
   lines:
     - "¡Bienvenido al Servidor!"
     - "¡Disfruta tu estadía!"
 
-# Líneas principales
 lines:
   - "En línea: %board_online%"
   - "Lobby: %board_lobby_connected%"
@@ -29,31 +35,51 @@ lines:
   - "  Vanilla: %board_vanilla_online%/%board_vanilla_max%"
   - "  Fabric: %board_fabric_online%/%board_fabric_max%"
 
-# Líneas de pie de página (abajo del board)
 footer:
   animation:
     enabled: false
-    interval: 60  # ticks para cambiar de línea
+    interval: 60
   lines:
     - "¡Juega limpio y diviértete!"
     - "¡Visita nuestro discord!"
 
-# Configuración global de animaciones
 animations:
   enabled: true
-  interval: 20  # ticks entre actualizaciones del board (1 segundo = 20 ticks)
+  interval: 20
 
-# Configuración de servidores para integración con Velocity
+# Velocity / Core (mismo protocolo que Selector)
+velocity:
+  sync-interval-ticks: 20
+  # IMPORTANTE: nombre de ESTE backend en velocity.toml (cambia en cada servidor Paper)
+  # Ejemplo en lobby1: local-server-name: "lobby1"
+  local-server-name: "lobby"
+  debug: false
+
+# Servidores: id = placeholder (%board_<id>_online%)
+# velocity-names = nombres exactos en velocity.toml (como en Selector)
 servers:
-  - name: "lobby"
-    display: "Lobby"
-    max_players: 100
-  - name: "vanilla"
-    display: "Vanilla"
-    max_players: 50
-  - name: "fabric"
-    display: "Fabric"
-    max_players: 25
+  # Suma jugadores de todos los lobbies (lobby1 + lobby2 + lobby3)
+  - id: lobby
+    velocity-names:
+      - lobby
+      - lobby2
+    max-players: 100
+    local-fallback: true
 
-# Para agregar más servidores, simplemente añade entradas a la lista 'servers' arriba
-# Los placeholders se generan automáticamente: %board_[server_name]_online% y %board_[server_name]_max%
+  - id: lobby2
+    velocity-names:
+      - lobby2
+    max-players: 100
+    local-fallback: true
+
+  - id: vanilla
+    velocity-names:
+      - vanilla
+    max-players: 100
+    local-fallback: true
+
+  - id: fabric
+    velocity-names:
+      - Fabric
+    max-players: 80
+    local-fallback: true

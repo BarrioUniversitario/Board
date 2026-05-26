@@ -16,59 +16,70 @@ import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
-import java.util.HashMap;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
+/**
+ * Integración con Velocity/Core vía canal {@value #CHANNEL}.
+ * Mismo protocolo que Selector ({@code PlayerCountAll} / {@code PlayerCount}).
+ */
 public final class Board extends JavaPlugin implements Listener, PluginMessageListener {
 
+    public static final String CHANNEL = "serverconnector:main";
+
     private BoardManager boardManager;
+    private BoardServerRegistry serverRegistry;
     private BukkitTask updateTask;
-    private final Map<String, Integer> serverCounts = new HashMap<>();
+    private BukkitTask syncTask;
+    private final Map<String, Integer> serverCounts = new ConcurrentHashMap<>();
 
     @Override
     public void onEnable() {
-        // Plugin startup logic
         saveDefaultConfig();
 
+        serverRegistry = new BoardServerRegistry(this);
         boardManager = new BoardManager(this);
 
-        // Register events
         getServer().getPluginManager().registerEvents(this, this);
-
-        // Register command
         getCommand("board").setExecutor(new BoardCommand(this));
 
-        // Register PlaceholderAPI expansion if available
         if (Bukkit.getPluginManager().isPluginEnabled("PlaceholderAPI")) {
             new BoardExpansion(this).register();
             getLogger().info("PlaceholderAPI expansion registrado correctamente.");
         }
 
-        // Register plugin messaging
-        getServer().getMessenger().registerOutgoingPluginChannel(this, "serverconnector:main");
-        getServer().getMessenger().registerIncomingPluginChannel(this, "serverconnector:main", this);
+        getServer().getMessenger().registerOutgoingPluginChannel(this, CHANNEL);
+        getServer().getMessenger().registerIncomingPluginChannel(this, CHANNEL, this);
 
-        // Create boards for online players
         for (Player player : getServer().getOnlinePlayers()) {
             boardManager.createBoard(player);
         }
 
         scheduleBoardUpdates();
+        scheduleVelocitySync();
 
-        // Request server counts periodically
-        getServer().getScheduler().runTaskTimer(this, this::requestServerCounts, 0L, 600L); // Every 30 seconds
+        if (!getServer().getOnlinePlayers().isEmpty()) {
+            getServer().getScheduler().runTaskLater(this, (Runnable) this::requestServerCounts, 20L);
+        }
     }
 
     @Override
     public void onDisable() {
-        // Plugin shutdown logic
         if (updateTask != null) {
             updateTask.cancel();
         }
-        // Unregister channels
+        if (syncTask != null) {
+            syncTask.cancel();
+        }
         getServer().getMessenger().unregisterOutgoingPluginChannel(this);
-        getServer().getMessenger().unregisterIncomingPluginChannel(this);
-        // Remove all boards
+        getServer().getMessenger().unregisterIncomingPluginChannel(this, CHANNEL, this);
         for (Player player : getServer().getOnlinePlayers()) {
             boardManager.removeBoard(player);
         }
@@ -77,6 +88,7 @@ public final class Board extends JavaPlugin implements Listener, PluginMessageLi
     @EventHandler
     public void onPlayerJoin(PlayerJoinEvent event) {
         boardManager.createBoard(event.getPlayer());
+        getServer().getScheduler().runTaskLater(this, () -> requestServerCounts(event.getPlayer()), 20L);
     }
 
     @EventHandler
@@ -100,44 +112,151 @@ public final class Board extends JavaPlugin implements Listener, PluginMessageLi
         scheduleBoardUpdates();
     }
 
-    private void requestServerCounts() {
-        // Send request to Velocity for server counts
-        if (!getServer().getOnlinePlayers().isEmpty()) {
-            try (ByteArrayOutputStream b = new ByteArrayOutputStream();
-                 DataOutputStream out = new DataOutputStream(b)) {
-                out.writeUTF("GetServerCounts"); // Subchannel for request
-                // Send to a random online player (Velocity will handle it)
-                Player player = getServer().getOnlinePlayers().iterator().next();
-                player.sendPluginMessage(this, "serverconnector:main", b.toByteArray());
-                getLogger().info("Sent server count request to Velocity via " + player.getName());
-            } catch (IOException e) {
-                getLogger().warning("Error sending server count request: " + e.getMessage());
+    private void scheduleVelocitySync() {
+        if (syncTask != null) {
+            syncTask.cancel();
+        }
+        int interval = Math.max(20, getConfig().getInt("velocity.sync-interval-ticks", 20));
+        syncTask = getServer().getScheduler().runTaskTimer(this, (Runnable) this::requestServerCounts, interval, interval);
+    }
+
+    public void rescheduleVelocitySync() {
+        scheduleVelocitySync();
+    }
+
+    public void requestServerCounts() {
+        if (getServer().getOnlinePlayers().isEmpty()) {
+            return;
+        }
+        requestServerCounts(getServer().getOnlinePlayers().iterator().next());
+    }
+
+    private static final Pattern PLACEHOLDER_PATTERN = Pattern.compile("%board_(\\w+?)_(?:online|connected|max)%");
+
+    public void requestServerCounts(Player player) {
+        if (player == null || !player.isOnline()) {
+            return;
+        }
+
+        Set<String> requested = new HashSet<>();
+
+        for (BoardServerRegistry.ServerEntry entry : serverRegistry.getEntries().values()) {
+            for (String velocityName : entry.getVelocityNames()) {
+                if (requested.add(velocityName)) {
+                    sendPlayerCountRequest(player, velocityName);
+                }
             }
-        } else {
-            getLogger().warning("No online players to send server count request");
+        }
+
+        Set<String> configuredIds = serverRegistry.getEntries().keySet();
+        List<String> allLines = new ArrayList<>();
+        allLines.addAll(getConfig().getStringList("lines"));
+        allLines.addAll(getConfig().getStringList("header.lines"));
+        allLines.addAll(getConfig().getStringList("footer.lines"));
+        for (String line : allLines) {
+            Matcher matcher = PLACEHOLDER_PATTERN.matcher(line);
+            while (matcher.find()) {
+                String id = matcher.group(1).toLowerCase(Locale.ROOT);
+                if (!configuredIds.contains(id) && requested.add(id)) {
+                    sendPlayerCountRequest(player, id);
+                }
+            }
+        }
+
+        sendPlayerCountAllRequest(player);
+    }
+
+    private void sendPlayerCountRequest(Player player, String serverName) {
+        try (ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+             DataOutputStream out = new DataOutputStream(buffer)) {
+            out.writeUTF("PlayerCount");
+            out.writeUTF(serverName);
+            player.sendPluginMessage(this, CHANNEL, buffer.toByteArray());
+        } catch (IOException e) {
+            getLogger().warning("Error enviando PlayerCount a Velocity: " + e.getMessage());
+        }
+    }
+
+    private void sendPlayerCountAllRequest(Player player) {
+        try (ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+             DataOutputStream out = new DataOutputStream(buffer)) {
+            out.writeUTF("PlayerCountAll");
+            player.sendPluginMessage(this, CHANNEL, buffer.toByteArray());
+        } catch (IOException e) {
+            getLogger().warning("Error enviando PlayerCountAll a Velocity: " + e.getMessage());
         }
     }
 
     @Override
     public void onPluginMessageReceived(@NotNull String channel, @NotNull Player player, byte[] message) {
-        if (!channel.equals("serverconnector:main")) return;
+        if (!CHANNEL.equals(channel)) {
+            return;
+        }
 
         try (DataInputStream in = new DataInputStream(new ByteArrayInputStream(message))) {
-            String subchannel = in.readUTF();
-            if ("ServerCount".equals(subchannel)) {
-                String server = in.readUTF();
-                int count = in.readInt();
-                serverCounts.put(server, count);
-                getLogger().info("Received server count for " + server + ": " + count);
+            String subChannel = in.readUTF();
+
+            boolean updated = false;
+            if ("PlayerCount".equals(subChannel)) {
+                serverCounts.put(in.readUTF(), in.readInt());
+                updated = true;
+            } else if ("PlayerCountAll".equals(subChannel)) {
+                if (in.available() >= 4) {
+                    in.mark(0);
+                    int possibleCount = in.readInt();
+                    if (possibleCount > 0 && possibleCount < 1024) {
+                        for (int i = 0; i < possibleCount && in.available() > 0; i++) {
+                            serverCounts.put(in.readUTF(), in.readInt());
+                        }
+                    } else {
+                        in.reset();
+                        while (in.available() > 0) {
+                            serverCounts.put(in.readUTF(), in.readInt());
+                        }
+                    }
+                }
+                updated = true;
             } else {
-                getLogger().info("Received unknown subchannel: " + subchannel);
+                getLogger().fine("Subcanal no manejado: " + subChannel);
+            }
+            if (updated) {
+                if (getConfig().getBoolean("velocity.debug", false)) {
+                    getLogger().info("Conteos Velocity: " + serverCounts);
+                }
+                boardManager.updateAllBoards();
             }
         } catch (IOException e) {
-            getLogger().warning("Error reading plugin message: " + e.getMessage());
+            getLogger().warning("Error leyendo mensaje de Velocity: " + e.getMessage());
         }
     }
 
-    public int getServerCount(String server) {
-        return serverCounts.getOrDefault(server, 0);
+    public BoardServerRegistry getServerRegistry() {
+        return serverRegistry;
+    }
+
+    public void reloadServerRegistry() {
+        serverRegistry.reload();
+    }
+
+    /** Conteo crudo recibido de Velocity (nombre exacto del proxy). */
+    public int getRawServerCount(String velocityName) {
+        if (velocityName == null) {
+            return 0;
+        }
+        Integer count = serverCounts.get(velocityName);
+        if (count != null) {
+            return count;
+        }
+        for (Map.Entry<String, Integer> entry : serverCounts.entrySet()) {
+            if (entry.getKey().equalsIgnoreCase(velocityName)) {
+                return entry.getValue();
+            }
+        }
+        return 0;
+    }
+
+    /** Conteo para placeholders (%board_&lt;id&gt;_online%). */
+    public int getServerCount(String placeholderId) {
+        return serverRegistry.getCount(placeholderId);
     }
 }

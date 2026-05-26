@@ -17,6 +17,7 @@ public class BoardManager {
     private final Map<UUID, FastBoard> boards = new HashMap<>();
     private final Map<UUID, Boolean> toggledOff = new HashMap<>();
     private int titleAnimationIndex = 0;
+    private int titleRainbowTicks = 0;
     private int headerAnimationIndex = 0;
     private int footerAnimationIndex = 0;
     private long elapsedTicks = 0;
@@ -42,7 +43,7 @@ public class BoardManager {
         FastBoard board = boards.get(player.getUniqueId());
         if (board == null || isToggledOff(player)) return;
 
-        board.updateTitle(Hex.colorize(getAnimatedLine("title", titleAnimationIndex, "Board")));
+        board.updateTitle(getTitle());
 
         List<String> headers = plugin.getConfig().getStringList("header.lines");
         List<String> footers = plugin.getConfig().getStringList("footer.lines");
@@ -67,6 +68,30 @@ public class BoardManager {
         }
 
         board.updateLines(boardLines);
+    }
+
+    private String getTitle() {
+        if (isRainbowTitle()) {
+            return RainbowAnimator.format(plugin.getConfig(), titleAnimationIndex);
+        }
+        return Hex.colorize(getAnimatedLine("title", titleAnimationIndex, "Board"));
+    }
+
+    private boolean isRainbowTitle() {
+        if (!plugin.getConfig().getBoolean("animations.enabled", true)) {
+            return false;
+        }
+        return plugin.getConfig().getBoolean("title.rainbow.enabled", false);
+    }
+
+    private boolean shouldAnimateTitle() {
+        if (!plugin.getConfig().getBoolean("animations.enabled", true)) {
+            return false;
+        }
+        if (isRainbowTitle()) {
+            return true;
+        }
+        return shouldAnimate("title");
     }
 
     private String getAnimatedLine(String section, int animationIndex, String fallback) {
@@ -113,24 +138,14 @@ public class BoardManager {
 
     private String replacePlaceholders(String line, Player player) {
         line = line.replace("%board_online%", String.valueOf(Bukkit.getOnlinePlayers().size()));
-        line = line.replace("%board_lobby_connected%", String.valueOf(plugin.getServerCount("lobby")));
-        line = line.replace("%board_lobby_online%", String.valueOf(plugin.getServerCount("lobby")));
-        line = line.replace("%board_lobby_max%", getServerMaxPlayers("lobby"));
-        line = line.replace("%board_vanilla_online%", String.valueOf(plugin.getServerCount("vanilla")));
-        line = line.replace("%board_vanilla_max%", getServerMaxPlayers("vanilla"));
-        line = line.replace("%board_fabric_online%", String.valueOf(plugin.getServerCount("fabric")));
-        line = line.replace("%board_fabric_max%", getServerMaxPlayers("fabric"));
 
-        for (Object serverObj : plugin.getConfig().getList("servers", Collections.emptyList())) {
-            if (serverObj instanceof Map<?, ?> server) {
-                Object nameObj = server.get("name");
-                if (nameObj == null) continue;
-                String serverName = String.valueOf(nameObj);
-                String key = serverName.toLowerCase();
-                line = line.replace("%board_" + key + "_online%", String.valueOf(plugin.getServerCount(serverName)));
-                line = line.replace("%board_" + key + "_max%", getServerMaxPlayers(serverName));
-                line = line.replace("%board_" + key + "_connected%", String.valueOf(plugin.getServerCount(serverName)));
-            }
+        for (BoardServerRegistry.ServerEntry entry : plugin.getServerRegistry().getEntries().values()) {
+            String id = entry.getId();
+            String count = String.valueOf(plugin.getServerCount(id));
+            String max = plugin.getServerRegistry().getMaxPlayers(id);
+            line = line.replace("%board_" + id + "_online%", count);
+            line = line.replace("%board_" + id + "_connected%", count);
+            line = line.replace("%board_" + id + "_max%", max);
         }
 
         if (Bukkit.getPluginManager().isPluginEnabled("PlaceholderAPI")) {
@@ -138,17 +153,6 @@ public class BoardManager {
         }
 
         return line;
-    }
-
-    private String getServerMaxPlayers(String serverName) {
-        for (Object serverObj : plugin.getConfig().getList("servers", Collections.emptyList())) {
-            if (serverObj instanceof Map<?, ?> server) {
-                if (serverName.equals(String.valueOf(server.get("name")))) {
-                    return String.valueOf(server.get("max_players"));
-                }
-            }
-        }
-        return "0";
     }
 
     public void updateAllBoards() {
@@ -166,8 +170,16 @@ public class BoardManager {
             return;
         }
 
-        if (shouldAnimate("title") && elapsedTicks % getAnimationInterval("title") == 0) {
-            titleAnimationIndex++;
+        if (shouldAnimateTitle()) {
+            if (isRainbowTitle()) {
+                titleRainbowTicks++;
+                if (titleRainbowTicks >= getAnimationInterval("title")) {
+                    titleAnimationIndex++;
+                    titleRainbowTicks = 0;
+                }
+            } else if (elapsedTicks % getAnimationInterval("title") == 0) {
+                titleAnimationIndex++;
+            }
         }
         if (shouldAnimate("header") && elapsedTicks % getAnimationInterval("header") == 0) {
             headerAnimationIndex++;
@@ -202,11 +214,15 @@ public class BoardManager {
 
     public void reload() {
         plugin.reloadConfig();
+        plugin.reloadServerRegistry();
         titleAnimationIndex = 0;
+        titleRainbowTicks = 0;
         headerAnimationIndex = 0;
         footerAnimationIndex = 0;
         elapsedTicks = 0;
         plugin.rescheduleBoardUpdates();
+        plugin.rescheduleVelocitySync();
+        plugin.requestServerCounts();
         updateAllBoards();
     }
 }
